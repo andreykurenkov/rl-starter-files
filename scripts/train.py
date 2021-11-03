@@ -1,12 +1,12 @@
 import argparse
 import time
 import datetime
+import torch
 import torch_ac
 import tensorboardX
 import sys
 
 import utils
-from utils import device
 from model import ACModel
 
 
@@ -15,9 +15,9 @@ from model import ACModel
 parser = argparse.ArgumentParser()
 
 ## General parameters
-parser.add_argument("--algo", required=True,
+parser.add_argument("--algo", default='ppo',
                     help="algorithm to use: a2c | ppo (REQUIRED)")
-parser.add_argument("--env", required=True,
+parser.add_argument("--env", default='MiniGrid-FourRoomsMemory-v0',
                     help="name of the environment to train on (REQUIRED)")
 parser.add_argument("--model", default=None,
                     help="name of the model (default: {ENV}_{ALGO}_{TIME})")
@@ -27,7 +27,7 @@ parser.add_argument("--log-interval", type=int, default=1,
                     help="number of updates between two logs (default: 1)")
 parser.add_argument("--save-interval", type=int, default=10,
                     help="number of updates between two saves (default: 10, 0 means no saving)")
-parser.add_argument("--procs", type=int, default=16,
+parser.add_argument("--procs", type=int, default=8,
                     help="number of processes (default: 16)")
 parser.add_argument("--frames", type=int, default=10**7,
                     help="number of frames of training (default: 1e7)")
@@ -61,10 +61,17 @@ parser.add_argument("--recurrence", type=int, default=1,
                     help="number of time-steps gradient is backpropagated (default: 1). If > 1, a LSTM is added to the model to have memory.")
 parser.add_argument("--text", action="store_true", default=False,
                     help="add a GRU to the model to handle text input")
+parser.add_argument("--rnn_hidden_size", type=int, default=64,
+                    help="size of rnn hidden state; if 0, same as input embedding size")
+parser.add_argument("--stacking", type=int, default=1)
+parser.add_argument("--rnn_memory", type=int, default=0)
+parser.add_argument("--dnc_memory", type=int, default=0)
+parser.add_argument("--register_memory", action="store_true", default=False,
+                    help="Use register memory")
 
 args = parser.parse_args()
 
-args.mem = args.recurrence > 1
+repeat_env = 'RepeatEnv-v0' in args.env
 
 # Set run dir
 
@@ -91,6 +98,7 @@ utils.seed(args.seed)
 
 # Set device
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 txt_logger.info(f"Device: {device}\n")
 
 # Load environments
@@ -99,7 +107,6 @@ envs = []
 for i in range(args.procs):
     envs.append(utils.make_env(args.env, args.seed + 10000 * i))
 txt_logger.info("Environments loaded\n")
-
 # Load training status
 
 try:
@@ -116,8 +123,8 @@ if "vocab" in status:
 txt_logger.info("Observations preprocessor loaded")
 
 # Load model
-
-acmodel = ACModel(obs_space, envs[0].action_space, args.mem, args.text)
+acmodel = ACModel(obs_space, envs[0].action_space, args.rnn_memory, args.text,
+                  args.register_memory, args.dnc_memory, args.stacking, repeat_env, args.rnn_hidden_size)
 if "model_state" in status:
     acmodel.load_state_dict(status["model_state"])
 acmodel.to(device)
@@ -125,7 +132,6 @@ txt_logger.info("Model loaded\n")
 txt_logger.info("{}\n".format(acmodel))
 
 # Load algo
-
 if args.algo == "a2c":
     algo = torch_ac.A2CAlgo(envs, acmodel, device, args.frames_per_proc, args.discount, args.lr, args.gae_lambda,
                             args.entropy_coef, args.value_loss_coef, args.max_grad_norm, args.recurrence,
